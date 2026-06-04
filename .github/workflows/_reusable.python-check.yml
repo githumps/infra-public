@@ -1,0 +1,117 @@
+name: _reusable · Python check (ruff + pytest)
+
+# Reusable Python lint/test. Encodes the ruff + uv + pytest conventions
+# once so consuming repos' validate jobs stop copy-pasting them (a tool
+# pin or rule change then lands in one place).
+#
+# Flow: checkout -> setup-uv -> install (uv sync) -> ruff check + ruff
+# format --check (toggle) -> test-cmd (skip if empty). uv manages the
+# Python toolchain (no setup-python); set `python-version` to override
+# via UV_PYTHON.
+#
+# Caller picks `runner` to match its tier: a GitHub-hosted runner
+# (ubuntu-latest) for public repos, or a self-hosted/ARC pool otherwise.
+# Consumed cross-repo as
+# `uses: githumps/infra-public/.github/workflows/_reusable.python-check.yml@<sha>`.
+# All actions SHA-pinned.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      working-directory:
+        description: "Directory to run install/lint/test in (the Python project root)."
+        required: false
+        type: string
+        default: "."
+      python-version:
+        description: "Optional Python version override (sets UV_PYTHON). Empty = use the project's .python-version / pyproject."
+        required: false
+        type: string
+        default: ""
+      install-cmd:
+        description: "Dependency install command. Run as a shell command (caller-controlled by design) — do NOT forward untrusted data (PR titles, etc.) into it."
+        required: false
+        type: string
+        default: "uv sync --frozen"
+      ruff:
+        description: "Run `ruff check` + `ruff format --check`."
+        required: false
+        type: boolean
+        default: true
+      use-uv-run:
+        description: "Prefix ruff with `uv run` (true, for uv-project repos) vs call `ruff` directly (false, for repos that install tools onto the system via `uv pip install --system` / requirements files)."
+        required: false
+        type: boolean
+        default: true
+      lint-paths:
+        description: "Path(s) ruff lints/format-checks, relative to working-directory. Default '.' (whole tree). Set e.g. 'services/' to scope linting to a subdir while deps install at the project root."
+        required: false
+        type: string
+        default: "."
+      test-cmd:
+        description: "Test command. Empty string skips the test step (lint-only callers). Run as a shell command (caller-controlled by design) — do NOT forward untrusted data into it."
+        required: false
+        type: string
+        default: "uv run pytest -q"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 15
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      UV_PYTHON: ${{ inputs.python-version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # Pin the interpreter for system-install repos (use-uv-run:false): their
+      # `uv pip install --system` targets the active Python, so without this the
+      # runner's default version is used (e.g. ubuntu-latest's 3.12) instead of
+      # the pinned one. uv-run repos skip this — uv resolves Python via UV_PYTHON.
+      - name: "Set up Python"
+        if: ${{ !inputs.use-uv-run && inputs.python-version != '' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: "Set up uv"
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+      - name: "Install dependencies"
+        run: ${{ inputs.install-cmd }}
+      - name: "Ruff check + format --check"
+        if: ${{ inputs.ruff }}
+        env:
+          # Pass via env (not direct ${{ }} in the command line) so the value
+          # can't inject a `${{ }}`-expanded shell command. Then validate it's
+          # path-shaped before word-splitting it into ruff args.
+          LINT_PATHS: ${{ inputs.lint-paths }}
+          RUFF: ${{ inputs.use-uv-run && 'uv run ruff' || 'ruff' }}
+        run: |
+          set -euo pipefail
+          case "$LINT_PATHS" in
+            *[!A-Za-z0-9_./\ -]*)
+              echo "::error::lint-paths must be path-shaped ([A-Za-z0-9_./ -]); got: $LINT_PATHS"
+              exit 1 ;;
+          esac
+          # Intentional word-split: $RUFF is a fixed 'uv run ruff'|'ruff' prefix
+          # and $LINT_PATHS is validated path-shaped above — both safe to split.
+          # shellcheck disable=SC2086
+          $RUFF check $LINT_PATHS
+          # shellcheck disable=SC2086
+          $RUFF format --check $LINT_PATHS
+      - name: "Test"
+        if: ${{ inputs.test-cmd != '' }}
+        run: ${{ inputs.test-cmd }}
