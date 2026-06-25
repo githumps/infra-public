@@ -7,7 +7,9 @@ name: _reusable · Python check (ruff + pytest)
 # Flow: checkout -> setup-uv -> install (uv sync) -> ruff check + ruff
 # format --check (toggle) -> test-cmd (skip if empty). uv manages the
 # Python toolchain (no setup-python); set `python-version` to override
-# via UV_PYTHON.
+# via UV_PYTHON. Set `ruff-version` to pin ruff exactly (via `uvx
+# ruff@<version>`) from the single-source RUFF_VERSION constant so
+# local pre-commit and CI lint with the identical ruff build.
 #
 # Caller picks `runner` to match its tier: a GitHub-hosted runner
 # (ubuntu-latest) for public repos, or a self-hosted/ARC pool otherwise.
@@ -43,6 +45,11 @@ on:
         required: false
         type: boolean
         default: true
+      ruff-version:
+        description: "Pin ruff to an exact version via `uvx ruff@<version>` (single source of truth - set from the canonical RUFF_VERSION constant). Empty = ruff resolved by the project (legacy: `uv run ruff` / `ruff`). When set, overrides `use-uv-run` for the ruff step (uvx fetches the pinned tool regardless of project deps)."
+        required: false
+        type: string
+        default: ""
       use-uv-run:
         description: "Prefix ruff with `uv run` (true, for uv-project repos) vs call `ruff` directly (false, for repos that install tools onto the system via `uv pip install --system` / requirements files)."
         required: false
@@ -103,15 +110,31 @@ jobs:
           # can't inject a `${{ }}`-expanded shell command. Then validate it's
           # path-shaped before word-splitting it into ruff args.
           LINT_PATHS: ${{ inputs.lint-paths }}
-          RUFF: ${{ inputs.use-uv-run && 'uv run ruff' || 'ruff' }}
+          # Resolve the ruff invocation by precedence:
+          #   ruff-version set -> `uvx ruff@<version>` (exact pin from the
+          #     single-source RUFF_VERSION; overrides use-uv-run since uvx
+          #     fetches the tool itself, project deps irrelevant).
+          #   else use-uv-run  -> `uv run ruff` (uv-project repos).
+          #   else             -> `ruff` (system-installed repos).
+          RUFF_VERSION: ${{ inputs.ruff-version }}
+          RUFF: ${{ inputs.ruff-version != '' && format('uvx ruff@{0}', inputs.ruff-version) || (inputs.use-uv-run && 'uv run ruff' || 'ruff') }}
         run: |
           set -euo pipefail
+          # Validate the version is semver-shaped before it reaches `uvx ruff@..`,
+          # so a malformed input fails loud rather than letting uvx mis-resolve.
+          if [ -n "$RUFF_VERSION" ]; then
+            case "$RUFF_VERSION" in
+              *[!0-9.]*)
+                echo "::error::ruff-version must be a dotted numeric version (e.g. 0.15.10); got: $RUFF_VERSION"
+                exit 1 ;;
+            esac
+          fi
           case "$LINT_PATHS" in
             *[!A-Za-z0-9_./\ -]*)
               echo "::error::lint-paths must be path-shaped ([A-Za-z0-9_./ -]); got: $LINT_PATHS"
               exit 1 ;;
           esac
-          # Intentional word-split: $RUFF is a fixed 'uv run ruff'|'ruff' prefix
+          # Intentional word-split: $RUFF is a fixed 'uvx ruff@x'|'uv run ruff'|'ruff' prefix
           # and $LINT_PATHS is validated path-shaped above — both safe to split.
           # shellcheck disable=SC2086
           $RUFF check $LINT_PATHS
