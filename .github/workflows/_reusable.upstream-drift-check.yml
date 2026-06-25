@@ -1,0 +1,147 @@
+name: _reusable · upstream drift check
+
+# Alerts when a vendored upstream repo has advanced past a pinned SHA stored
+# in a file in the consuming repo. Compares the pin to the upstream ref and,
+# on drift, opens a GitHub issue deduplicated by title (or comments on the
+# existing one). Encodes the pin-vs-upstream pattern once so consuming repos
+# stop copy-pasting near-identical "upstream check" workflows.
+#
+# Flow: checkout -> read `pin_file` -> `git ls-remote` the upstream ref (bounded
+# by `timeout 30` so a half-open connection fails fast under pipefail rather
+# than burning the job timeout) -> compare -> open/comment a drift issue.
+#
+# The issue title is `<name> upstream drift: <pin7> -> <upstream7>`; dedup keys
+# on the leading `<name> upstream drift:` so repeated runs comment on the same
+# open issue instead of filing duplicates.
+#
+# Caller picks `runner` per tier policy (public -> ubuntu-latest; private ->
+# their ARC pool). Grant `issues: write`. Consumed cross-repo as
+# `uses: githumps/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>`.
+# All actions SHA-pinned.
+#
+# Example caller:
+#   jobs:
+#     check:
+#       uses: githumps/infra-public/.github/workflows/_reusable.upstream-drift-check.yml@<sha>
+#       permissions: { contents: read, issues: write }
+#       with:
+#         name: claude-config
+#         upstream_repo: https://github.com/solatis/claude-config.git
+#         upstream_ref: refs/heads/main
+#         pin_file: .claude-config-pin
+#         runner: arc-somatic-scripts
+#         sync_instructions: |
+#           Run `./scripts/update-claude-config.sh` then commit the bumped pin.
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Short human label for this upstream (e.g. claude-config). Used in the issue title and dedup key."
+        required: true
+        type: string
+      upstream_repo:
+        description: "Upstream git URL passed to `git ls-remote` (e.g. https://github.com/owner/repo.git)."
+        required: true
+        type: string
+      pin_file:
+        description: "Path (in the consuming repo) to the file holding the pinned upstream SHA. Whitespace is stripped."
+        required: true
+        type: string
+      upstream_ref:
+        description: "Ref to resolve upstream (e.g. HEAD, or refs/heads/main). Default HEAD."
+        required: false
+        type: string
+        default: "HEAD"
+      issue_label:
+        description: "Label applied to a newly opened drift issue."
+        required: false
+        type: string
+        default: "chore"
+      sync_instructions:
+        description: "Optional Markdown appended to the drift-issue body describing how to sync + bump the pin. Caller-controlled by design - do NOT forward untrusted data."
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool (private)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 5
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Compare pin to upstream HEAD
+        id: diff
+        env:
+          PIN_FILE: ${{ inputs.pin_file }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          pinned=$(tr -d '[:space:]' < "$PIN_FILE")
+          # `timeout 30` bounds the external network call (#1196): a half-open
+          # connection should fail fast under pipefail, not burn the job's full
+          # timeout-minutes and tie up the runner.
+          upstream=$(timeout 30 git ls-remote "$UPSTREAM_REPO" "$UPSTREAM_REF" | awk '{print $1}')
+          if [[ -z "$upstream" ]]; then
+            echo "could not resolve upstream ref '$UPSTREAM_REF' at '$UPSTREAM_REPO'" >&2
+            exit 1
+          fi
+          echo "pinned=$pinned"     >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          if [[ "$pinned" == "$upstream" ]]; then
+            echo "up_to_date=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open / update drift issue
+        if: steps.diff.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAME:     ${{ inputs.name }}
+          REPO_URL: ${{ inputs.upstream_repo }}
+          LABEL:    ${{ inputs.issue_label }}
+          SYNC:     ${{ inputs.sync_instructions }}
+          PINNED:   ${{ steps.diff.outputs.pinned }}
+          UPSTREAM: ${{ steps.diff.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          # Derive an owner/repo compare URL from the ls-remote URL (strip
+          # scheme + trailing .git) so the body links to a GitHub compare view.
+          slug=$(echo "$REPO_URL" | sed -E 's#^https?://[^/]+/##; s#\.git$##')
+          title="$NAME upstream drift: ${PINNED:0:7} -> ${UPSTREAM:0:7}"
+          body=$(cat <<EOF
+          $slug has advanced past our pinned SHA.
+
+          - pinned:   \`$PINNED\`
+          - upstream: \`$UPSTREAM\`
+          - compare:  https://github.com/$slug/compare/$PINNED...$UPSTREAM
+
+          $SYNC
+          EOF
+          )
+          # Dedup on the stable title prefix (ignoring the changing short SHAs)
+          # so a still-drifted upstream comments on the existing issue.
+          existing=$(gh issue list --search "$NAME upstream drift:" --state open --json number,title \
+            --jq "[.[] | select(.title | startswith(\"$NAME upstream drift:\"))][0].number" || true)
+          if [[ -n "$existing" && "$existing" != "null" ]]; then
+            gh issue comment "$existing" --body "Still drifted as of $(date -u +%F). Upstream now at \`$UPSTREAM\`."
+          else
+            gh issue create --title "$title" --body "$body" --label "$LABEL"
+          fi
