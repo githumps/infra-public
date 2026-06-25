@@ -1,0 +1,134 @@
+name: _reusable · Rust check (fmt + clippy + test)
+
+# Reusable Rust lint/test. Encodes the cargo fmt + clippy + test
+# conventions once so consuming Rust repos' CI jobs stop copy-pasting
+# them (a toolchain pin or lint-flag change then lands in one place).
+# Sibling of verify.temper.yml (which builds the temper binary via
+# cargo) and check.python.yml (the ruff + pytest equivalent).
+#
+# Flow: checkout -> install Rust toolchain (clippy + rustfmt) -> cache
+# cargo registry/git + target -> cargo fmt --check (toggle) -> cargo
+# clippy (toggle, -D warnings) -> test-cmd (skip if empty). Caller sets
+# `working-directory` to the crate/workspace root, picks the toolchain
+# channel, and may pass --features via `cargo-features`.
+#
+# Caller picks `runner` to match its tier: a GitHub-hosted runner
+# (ubuntu-latest) for public repos, or a self-hosted/ARC pool otherwise.
+# Consumed cross-repo as
+# `uses: githumps/infra-public/.github/workflows/check.rust.yml@<sha>`.
+# All actions SHA-pinned.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label/pool (caller picks per tier policy). e.g. ubuntu-latest (public) or an ARC pool."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      working-directory:
+        description: "Directory to run cargo in (the crate or workspace root)."
+        required: false
+        type: string
+        default: "."
+      toolchain:
+        description: "Rust toolchain channel/version (e.g. stable, 1.81.0, nightly)."
+        required: false
+        type: string
+        default: "stable"
+      fmt:
+        description: "Run `cargo fmt --check`."
+        required: false
+        type: boolean
+        default: true
+      clippy:
+        description: "Run `cargo clippy` with -D warnings."
+        required: false
+        type: boolean
+        default: true
+      cargo-features:
+        description: "Optional feature args appended to clippy/test (e.g. '--all-features' or '--features foo,bar'). Validated arg-shaped before use."
+        required: false
+        type: string
+        default: ""
+      test-cmd:
+        description: "Test command. Empty string skips the test step (lint-only callers). Run as a shell command (caller-controlled by design) — do NOT forward untrusted data into it."
+        required: false
+        type: string
+        default: "cargo test --verbose"
+      timeout-minutes:
+        description: "Job timeout."
+        required: false
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        # Don't leave GITHUB_TOKEN in .git/config: this job then runs
+        # caller-controlled test-cmd, which would otherwise be able to
+        # read the persisted token. Lint/test need no git auth.
+        with:
+          persist-credentials: false
+
+      - name: "Install Rust toolchain"
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-06
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          components: clippy, rustfmt
+
+      - name: "Cache cargo"
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ inputs.working-directory }}/target
+          key: ${{ runner.os }}-cargo-${{ inputs.toolchain }}-${{ hashFiles(format('{0}/**/Cargo.lock', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ inputs.toolchain }}-
+            ${{ runner.os }}-cargo-
+
+      - name: "cargo fmt --check"
+        if: ${{ inputs.fmt }}
+        run: cargo fmt --check
+
+      - name: "cargo clippy (-D warnings)"
+        if: ${{ inputs.clippy }}
+        env:
+          # Pass via env (not direct ${{ }} in the command line) so the value
+          # can't inject a `${{ }}`-expanded shell command. Then validate it's
+          # arg-shaped before word-splitting it into cargo args.
+          CARGO_FEATURES: ${{ inputs.cargo-features }}
+        run: |
+          set -euo pipefail
+          case "$CARGO_FEATURES" in
+            *[!A-Za-z0-9_,.=/\ -]*)
+              echo "::error::cargo-features must be arg-shaped ([A-Za-z0-9_,.=/ -]); got: $CARGO_FEATURES"
+              exit 1 ;;
+          esac
+          # Intentional word-split: $CARGO_FEATURES is validated arg-shaped above.
+          # shellcheck disable=SC2086
+          cargo clippy $CARGO_FEATURES -- -D warnings
+
+      - name: "Test"
+        if: ${{ inputs.test-cmd != '' }}
+        env:
+          CARGO_FEATURES: ${{ inputs.cargo-features }}
+        run: |
+          set -euo pipefail
+          case "$CARGO_FEATURES" in
+            *[!A-Za-z0-9_,.=/\ -]*)
+              echo "::error::cargo-features must be arg-shaped ([A-Za-z0-9_,.=/ -]); got: $CARGO_FEATURES"
+              exit 1 ;;
+          esac
+          ${{ inputs.test-cmd }}
