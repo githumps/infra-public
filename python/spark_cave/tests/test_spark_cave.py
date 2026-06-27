@@ -32,9 +32,7 @@ class _FakeSQS:
 
 
 def _job() -> FallbackJob:
-    return FallbackJob(
-        SCHEMA_VERSION, "meal-gen", "u1", "r1", PayloadRef("inline", {"a": 1}, None)
-    )
+    return FallbackJob(SCHEMA_VERSION, "meal-gen", "u1", "r1", PayloadRef("inline", {"a": 1}, None))
 
 
 def test_job_round_trips_inline_payload():
@@ -59,18 +57,14 @@ def test_dedup_key_is_persona_principal_request():
 
 
 def test_result_round_trips():
-    r = FallbackResult(
-        SCHEMA_VERSION, "meal-gen", "u1", "r1", True, {"proposals": []}, None
-    )
+    r = FallbackResult(SCHEMA_VERSION, "meal-gen", "u1", "r1", True, {"proposals": []}, None)
     assert FallbackResult.from_json(r.to_json()) == r
 
 
 def test_handle_result_dispatches_to_the_right_persona():
     seen: list[str] = []
     r = FallbackResult(SCHEMA_VERSION, "meal-gen", "u1", "r1", True, {"x": 1}, None)
-    ran = handle_result(
-        r.to_json(), handlers={"meal-gen": lambda res: seen.append(res.request_id)}
-    )
+    ran = handle_result(r.to_json(), handlers={"meal-gen": lambda res: seen.append(res.request_id)})
     assert ran is True and seen == ["r1"]
 
 
@@ -107,11 +101,7 @@ def test_pack_large_payload_spills_to_s3():
         return {"bucket": "B", "key": "K"}
 
     ref = pack({"big": "x" * 500}, threshold_bytes=50, put_s3=put)
-    assert (
-        ref.kind == "s3"
-        and ref.s3 == {"bucket": "B", "key": "K"}
-        and ref.inline is None
-    )
+    assert ref.kind == "s3" and ref.s3 == {"bucket": "B", "key": "K"} and ref.inline is None
     assert b"big" in captured["bytes"]
 
 
