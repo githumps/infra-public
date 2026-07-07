@@ -63,6 +63,12 @@ default session is not safe for; the enqueue side's single send is a much
 narrower window that has not shown the issue in practice, but the read side
 takes the more defensive form since it is the one actually exercised
 concurrently today.
+
+Operational assumption: ONE logical drain consumer per persona/queue. If
+multiple pollers ever share a results queue, a receive by one hides messages
+from the others for the visibility timeout, so that timeout must be sized
+well below any caller's total re-poll budget (it is provisioned alongside
+the lane, sized to the inference budget plus long-poll).
 """
 
 from __future__ import annotations
@@ -356,7 +362,7 @@ async def fetch_result_for(
                 QueueUrl=channel.results_queue_url,
                 MaxNumberOfMessages=RECEIVE_BATCH_SIZE,
                 WaitTimeSeconds=RECEIVE_WAIT_SECONDS,
-                AttributeNames=["SentTimestamp"],
+                MessageSystemAttributeNames=["SentTimestamp"],
             )
         except Exception as e:
             # A throttle / NonExistentQueue / network blip on the receive is
@@ -365,6 +371,7 @@ async def fetch_result_for(
             log.warning(
                 "spark_cave.poll.receive_failed",
                 extra={"request_id": request_id, "reason": str(e), "exc_type": type(e).__name__},
+                exc_info=True,
             )
             return CaveOutcome(status="pending")
         messages = resp.get("Messages", []) if isinstance(resp, dict) else []
@@ -413,6 +420,7 @@ async def _purge_if_abandoned(channel: CaveResultChannel, msg: dict, request_id:
         log.warning(
             "spark_cave.poll.abandoned_purge_failed",
             extra={"request_id": request_id, "reason": str(e), "exc_type": type(e).__name__},
+            exc_info=True,
         )
 
 
@@ -443,17 +451,21 @@ async def _resolve_matched(
             log.warning(
                 "spark_cave.poll.delete_failed",
                 extra={"request_id": result_obj.request_id, "reason": str(e), "exc_type": type(e).__name__},
+                exc_info=True,
             )
 
     if not result_obj.ok:
         # The connector reported a failure -> honest failed. Consume it.
-        log.warning(
-            "spark_cave.poll.failed", extra={"request_id": result_obj.request_id, "error": result_obj.error}
-        )
-        await _delete()
-        # Bounded + whitelisted-charset: this string may travel to a caller.
+        # Bounded + whitelisted-charset FIRST: this string may travel to a
+        # caller AND to the log pipeline -- never log the raw connector
+        # value (arbitrary payload text does not belong in log storage).
         err = str(result_obj.error or "")[:64]
         detail = err if re.fullmatch(r"[A-Za-z0-9_:]{1,64}", err) else None
+        log.warning(
+            "spark_cave.poll.failed",
+            extra={"request_id": result_obj.request_id, "error": detail or "<unwhitelisted-detail-dropped>"},
+        )
+        await _delete()
         return CaveOutcome(status="failed", detail=detail)
 
     try:
@@ -474,6 +486,7 @@ async def _resolve_matched(
         log.warning(
             "spark_cave.poll.garbled",
             extra={"request_id": result_obj.request_id, "reason": str(e), "exc_type": type(e).__name__},
+            exc_info=True,
         )
         await _delete()
         return CaveOutcome(status="failed")

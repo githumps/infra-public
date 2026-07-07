@@ -17,6 +17,7 @@ primitives, proving a new persona needs no new plumbing on either side.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -60,9 +61,15 @@ class _FakeSQSReceiver:
         self._messages.append(msg)
         return handle
 
-    def receive_message(self, *, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds, AttributeNames=None):
+    def receive_message(
+        self, *, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds, MessageSystemAttributeNames=None
+    ):
+        # Rotate the head so successive polls see successive slices, the way
+        # a real deep FIFO would present distinct pages -- a fake that
+        # returns the same head forever makes depth-bound tests vacuous.
         self.receive_calls += 1
         batch = self._messages[:MaxNumberOfMessages]
+        self._messages = self._messages[len(batch) :] + batch
         return {"Messages": batch}
 
     def delete_message(self, *, QueueUrl, ReceiptHandle):
@@ -126,7 +133,6 @@ def test_build_channel_none_when_queue_url_blank(monkeypatch):
 
 
 def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
-    import logging
 
     monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "treu")
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
@@ -138,7 +144,6 @@ def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
 
 @pytest.mark.parametrize("falsy", ["0", "false", "no", "off"])
 def test_explicit_falsy_disables_silently(monkeypatch, caplog, falsy):
-    import logging
 
     monkeypatch.setenv("MACCHINA_CAVE_ENABLED", falsy)
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
@@ -454,6 +459,20 @@ async def test_sync_parse_callback_is_supported():
 
     outcome = await fetch_result_for(channel, request_id="r", parse=sync_parse)
     assert outcome == CaveOutcome(status="ready", parsed={"seen": 1})
+
+
+@pytest.mark.asyncio
+async def test_raw_connector_error_never_reaches_logs(caplog):
+
+    sqs = _FakeSQSReceiver()
+    raw = "boom <script>alert(1)</script> \u00e9chec"
+    sqs.add(_result("r", persona="throwaway", ok=False, error=raw))
+    channel = CaveResultChannel(sqs=sqs, results_queue_url="https://q/x.fifo", persona="throwaway")
+    with caplog.at_level(logging.WARNING):
+        outcome = await fetch_result_for(channel, request_id="r", parse=_echo_parse)
+    assert outcome.status == "failed" and outcome.detail is None
+    for rec in caplog.records:
+        assert raw not in str(rec.__dict__)
 
 
 @pytest.mark.asyncio
