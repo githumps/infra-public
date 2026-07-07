@@ -68,9 +68,11 @@ concurrently today.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -241,7 +243,14 @@ def build_result_channel_from_env(
     bucket = os.getenv(bucket_var, "").strip()
     if bucket:
         if s3_factory is None:
-            import boto3  # local import: keep module import AWS-free
+            try:
+                import boto3  # local import: keep module import AWS-free
+            except ImportError as exc:
+                raise ImportError(
+                    "spark_cave declares no runtime dependencies; to enable "
+                    f"s3 spillover ({bucket_var} is set) either install "
+                    "boto3 or pass s3_factory= explicitly"
+                ) from exc
 
             def _default_s3_factory():
                 return boto3.session.Session().client("s3")
@@ -249,9 +258,19 @@ def build_result_channel_from_env(
             s3_factory = _default_s3_factory
 
         s3_client = s3_factory()
+        allowed_bucket = bucket
 
         def get_s3(pointer: dict) -> bytes:
-            obj = s3_client.get_object(Bucket=pointer["bucket"], Key=pointer["key"])
+            # The env-configured bucket is the ONLY bucket this channel may
+            # read. A message-supplied pointer naming any other bucket is
+            # rejected outright -- honoring it would let queue content
+            # expand the read surface past the lane's IAM intent.
+            if pointer.get("bucket") != allowed_bucket:
+                raise ValueError(
+                    f"cave result s3 pointer names bucket {pointer.get('bucket')!r}, "
+                    f"but this channel is configured for {allowed_bucket!r}"
+                )
+            obj = s3_client.get_object(Bucket=allowed_bucket, Key=pointer["key"])
             return obj["Body"].read()
 
     return CaveResultChannel(
@@ -305,7 +324,7 @@ async def fetch_result_for(
     channel: CaveResultChannel,
     *,
     request_id: str,
-    parse: Callable[[dict], Awaitable[object]],
+    parse: Callable[[dict], Awaitable[object] | object],
 ) -> CaveOutcome:
     """Drain the results FIFO looking for `request_id`; return the honest
     outcome. Scans up to `MAX_RECEIVE_BATCHES` batches per call so a deep
@@ -401,7 +420,7 @@ async def _resolve_matched(
     channel: CaveResultChannel,
     result_obj: FallbackResult,
     msg: dict,
-    parse: Callable[[dict], Awaitable[object]],
+    parse: Callable[[dict], Awaitable[object] | object],
 ) -> CaveOutcome:
     """Turn the matched `FallbackResult` into the final outcome, deleting the
     message once resolved (so it doesn't redeliver forever)."""
@@ -434,7 +453,7 @@ async def _resolve_matched(
         await _delete()
         # Bounded + whitelisted-charset: this string may travel to a caller.
         err = str(result_obj.error or "")[:64]
-        detail = err if err.replace("_", "").replace(":", "").isalnum() else None
+        detail = err if re.fullmatch(r"[A-Za-z0-9_:]{1,64}", err) else None
         return CaveOutcome(status="failed", detail=detail)
 
     try:
@@ -443,7 +462,9 @@ async def _resolve_matched(
         # async work. Both are covered by this one try/except -- see
         # DECISION 4 in the module docstring.
         payload = await asyncio.to_thread(_unwrap_payload, result_obj.result or {}, channel.get_s3)
-        parsed = await parse(payload)
+        parsed = parse(payload)
+        if inspect.isawaitable(parsed):
+            parsed = await parsed
     except Exception as e:
         # ok=true but the payload was garbled (the persona's `parse` raised)
         # OR the S3 spillover fetch failed/was miswired. EITHER way it's an
@@ -467,13 +488,13 @@ async def _resolve_matched(
 
 
 __all__ = (
-    "CaveOutcome",
-    "CaveResultChannel",
-    "CaveStatus",
+    "ABANDONED_RESULT_MAX_AGE_SECONDS",
     "MAX_RECEIVE_BATCHES",
     "RECEIVE_BATCH_SIZE",
     "RECEIVE_WAIT_SECONDS",
-    "ABANDONED_RESULT_MAX_AGE_SECONDS",
+    "CaveOutcome",
+    "CaveResultChannel",
+    "CaveStatus",
     "S3Getter",
     "SQSReceiver",
     "build_result_channel_from_env",

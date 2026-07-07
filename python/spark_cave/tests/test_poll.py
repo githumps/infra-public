@@ -401,7 +401,70 @@ async def test_non_matching_message_with_no_sent_timestamp_is_left_alone():
     assert len(sqs.remaining_bodies) == 1
 
 
+def test_build_channel_s3_getter_rejects_foreign_bucket(monkeypatch):
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "1")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_PAYLOAD_BUCKET", "macchina-cave-payloads")
+
+    class _FakeS3:
+        calls = 0
+
+        def get_object(self, **kw):
+            _FakeS3.calls += 1
+            raise AssertionError("must never be called for a foreign bucket")
+
+    channel = build_result_channel_from_env(
+        "MACCHINA", persona="meal-gen", sqs_factory=_FakeSQSReceiver, s3_factory=_FakeS3
+    )
+    assert channel is not None and channel.get_s3 is not None
+    with pytest.raises(ValueError, match="configured for"):
+        channel.get_s3({"bucket": "attacker-bucket", "key": "k1"})
+    assert _FakeS3.calls == 0
+
+
+def test_build_channel_s3_missing_boto3_raises_actionable_error(monkeypatch):
+    import builtins
+
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "1")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_PAYLOAD_BUCKET", "macchina-cave-payloads")
+    real_import = builtins.__import__
+
+    def _no_boto3(name, *a, **kw):
+        if name == "boto3":
+            raise ImportError("No module named 'boto3'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_boto3)
+    with pytest.raises(ImportError, match="install boto3 or"):
+        build_result_channel_from_env("MACCHINA", persona="meal-gen", sqs_factory=_FakeSQSReceiver)
+
+
 # ---- S3 spillover unwrap -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_parse_callback_is_supported():
+    sqs = _FakeSQSReceiver()
+    sqs.add(_result("r", persona="throwaway", result={"x": 1}))
+    channel = CaveResultChannel(sqs=sqs, results_queue_url="https://q/x.fifo", persona="throwaway")
+
+    def sync_parse(payload: dict):
+        return {"seen": payload["x"]}
+
+    outcome = await fetch_result_for(channel, request_id="r", parse=sync_parse)
+    assert outcome == CaveOutcome(status="ready", parsed={"seen": 1})
+
+
+@pytest.mark.asyncio
+async def test_unicode_alnum_error_detail_is_dropped():
+    # str.isalnum() accepts unicode letters; the whitelist must not.
+    sqs = _FakeSQSReceiver()
+    sqs.add(_result("r", persona="throwaway", ok=False, error="\u00e9chec_r\u00e9seau"))
+    channel = CaveResultChannel(sqs=sqs, results_queue_url="https://q/x.fifo", persona="throwaway")
+    outcome = await fetch_result_for(channel, request_id="r", parse=_echo_parse)
+    assert outcome.status == "failed"
+    assert outcome.detail is None
 
 
 @pytest.mark.asyncio
