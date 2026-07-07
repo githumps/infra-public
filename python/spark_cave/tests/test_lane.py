@@ -110,6 +110,46 @@ def test_throwaway_third_persona_needs_no_new_plumbing(monkeypatch):
 # ---- enqueue: FIFO group/dedup parity with cave_tail's mirror --------------
 
 
+def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "treu")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_JOBS_QUEUE_URL", "https://q/x.fifo")
+    with caplog.at_level(logging.WARNING):
+        lane = build_lane_from_env("MACCHINA", persona="meal-gen", sqs_factory=_FakeSQS)
+    assert lane is None
+    assert any("not a recognized boolean" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "no", "off"])
+def test_explicit_falsy_disables_silently(monkeypatch, caplog, falsy):
+    import logging
+
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", falsy)
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_JOBS_QUEUE_URL", "https://q/x.fifo")
+    with caplog.at_level(logging.WARNING):
+        lane = build_lane_from_env("MACCHINA", persona="meal-gen", sqs_factory=_FakeSQS)
+    assert lane is None
+    assert not caplog.records
+
+
+def test_enabled_without_boto3_or_factory_raises_actionable_import_error(monkeypatch):
+    import builtins
+
+    monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "1")
+    monkeypatch.setenv("SPARK_CAVE_MACCHINA_JOBS_QUEUE_URL", "https://q/x.fifo")
+    real_import = builtins.__import__
+
+    def _no_boto3(name, *a, **kw):
+        if name == "boto3":
+            raise ImportError("No module named 'boto3'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_boto3)
+    with pytest.raises(ImportError, match="install boto3 or"):
+        build_lane_from_env("MACCHINA", persona="meal-gen")
+
+
 @pytest.mark.asyncio
 async def test_enqueue_sends_fifo_group_and_dedup_matching_cave_tail_shape():
     sqs = _FakeSQS()
