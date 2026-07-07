@@ -17,6 +17,7 @@ primitives, proving a new persona needs no new plumbing on either side.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -132,7 +133,6 @@ def test_build_channel_none_when_queue_url_blank(monkeypatch):
 
 
 def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
-    import logging
 
     monkeypatch.setenv("MACCHINA_CAVE_ENABLED", "treu")
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
@@ -144,7 +144,6 @@ def test_garbage_enabled_value_warns_but_disables(monkeypatch, caplog):
 
 @pytest.mark.parametrize("falsy", ["0", "false", "no", "off"])
 def test_explicit_falsy_disables_silently(monkeypatch, caplog, falsy):
-    import logging
 
     monkeypatch.setenv("MACCHINA_CAVE_ENABLED", falsy)
     monkeypatch.setenv("SPARK_CAVE_MACCHINA_RESULTS_QUEUE_URL", "https://q/results.fifo")
@@ -464,7 +463,6 @@ async def test_sync_parse_callback_is_supported():
 
 @pytest.mark.asyncio
 async def test_raw_connector_error_never_reaches_logs(caplog):
-    import logging
 
     sqs = _FakeSQSReceiver()
     raw = "boom <script>alert(1)</script> \u00e9chec"
