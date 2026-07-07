@@ -267,16 +267,28 @@ def build_result_channel_from_env(
         allowed_bucket = bucket
 
         def get_s3(pointer: dict) -> bytes:
-            # The env-configured bucket is the ONLY bucket this channel may
-            # read. A message-supplied pointer naming any other bucket is
-            # rejected outright -- honoring it would let queue content
-            # expand the read surface past the lane's IAM intent.
+            # BOTH pointer fields are message-controlled and BOTH are
+            # allowlisted before any S3 call. Bucket: the env-configured
+            # bucket is the ONLY bucket this channel may read -- honoring a
+            # message-supplied bucket would let queue content expand the
+            # read surface past the lane's IAM intent. Key: bounded,
+            # conservative charset, no traversal shapes -- connectors write
+            # program-generated keys, so anything outside this shape is a
+            # manipulated pointer, not a real spill.
             if pointer.get("bucket") != allowed_bucket:
                 raise ValueError(
                     f"cave result s3 pointer names bucket {pointer.get('bucket')!r}, "
                     f"but this channel is configured for {allowed_bucket!r}"
                 )
-            obj = s3_client.get_object(Bucket=allowed_bucket, Key=pointer["key"])
+            key = pointer.get("key")
+            if (
+                not isinstance(key, str)
+                or not re.fullmatch(r"[A-Za-z0-9._/-]{1,512}", key)
+                or key.startswith("/")
+                or ".." in key
+            ):
+                raise ValueError(f"cave result s3 pointer key fails the allowlist: {key!r:.80}")
+            obj = s3_client.get_object(Bucket=allowed_bucket, Key=key)
             return obj["Body"].read()
 
     return CaveResultChannel(
