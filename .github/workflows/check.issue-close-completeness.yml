@@ -72,8 +72,10 @@ jobs:
                 continue;
               }
               
-              // Detect section headers (more lenient: just needs to start with ** or #)
-              const isSectionHeader = /^#{1,6}\s+|^(\*\*|__)[^*\n]*(\*\*|__)/.test(line);
+              // Detect section headers only when NOT tracking a multi-line bullet continuation.
+              // A line starting with ** or __ after trimming could be either a real header OR
+              // a trimmed continuation line - we must not misclassify the latter as a header.
+              const isSectionHeader = currentBulletChecked === null && /^#{1,6}\s+|^(\*\*|__)[^*\n]*(\*\*)/.test(line);
               
               if (isSectionHeader) {
                 // Save previous section state before updating (for flushing pending bullets correctly)
