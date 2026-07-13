@@ -10,6 +10,11 @@ name: _reusable · issue-close completeness guard
 # - Line-wrapped bullets now tracked across continuation lines
 # - Code block checkboxes ignored (tracked via ``` delimiter state)
 # - Section header detection more lenient (matches start of line, not entire line)
+#
+# Bug fixes 2026-07-13 (Qodo review):
+# - Fixed: currentBulletText now properly declared in state block
+# - Fixed: skippingSection consulted before processing list items and continuations  
+# - Fixed: code fence detection accepts any non-backtick info string, not just \w*
 
 on:
   workflow_call:
@@ -32,31 +37,32 @@ jobs:
         with:
           script: |
             const issue = context.payload.issue;
-            if (issue.state_reason && issue.state_reason !== 'completed') {
+            if (issue.state_reason && issue.state_reason !== "completed") {
               core.info(`closed as ${issue.state_reason} — allowed`);
               return;
             }
-            const labels = (issue.labels || []).map(l => (l.name || '').toLowerCase());
-            if (labels.includes('force-close') || labels.includes('wontfix')) {
-              core.info('force-close/wontfix label present — allowed');
+            const labels = (issue.labels || []).map(l => (l.name || "").toLowerCase());
+            if (labels.includes("force-close") || labels.includes("wontfix")) {
+              core.info("force-close/wontfix label present — allowed");
               return;
             }
             
-            const body = issue.body || '';
-            const lines = body.split('\n');
+            const body = issue.body || "";
+            const lines = body.split("\n");
             
             // Track state across lines
             let inCodeBlock = false;  // track ``` blocks
             let skippingSection = false;  // currently in an exempt section (Out of scope, etc.)
-            let currentBulletChecked = null;  // if we're tracking a multi-line bullet, is it checked?
+            let currentBulletChecked = null;  // if we are tracking a multi-line bullet, is it checked?
+            let currentBulletText = "";  // accumulated text for multi-line unchecked bullets
             
             const uncheckedItems = [];
             
             for (const raw of lines) {
               const line = raw.trim();
               
-              // Toggle code block state (``` marks)
-              if (/^```\w*$/.test(line)) {
+              // Toggle code block state (``` marks) — accepts any info string after backticks
+              if (/^```[^`]*$/.test(line)) {
                 inCodeBlock = !inCodeBlock;
                 continue;
               }
@@ -71,19 +77,29 @@ jobs:
               
               if (isSectionHeader) {
                 // Check if this is an exempt section header
-                const lowerLine = line.toLowerCase().replace(/[#*_]/g, '');
+                const lowerLine = line.toLowerCase().replace(/[#*_]/g, "");
                 skippingSection = /out of scope|blocked by|reverse-if-wrong|candidate|further notes|notes$/.test(lowerLine);
                 
-                // If we were tracking a multi-line bullet that ended without being checked, flag it
-                if (currentBulletChecked !== null && !currentBulletChecked) {
-                  uncheckedItems.push(currentBulletText);
+                // If we were tracking a multi-line bullet that ended without being checked, flag it (only if not in exempt section)
+                if (!skippingSection && currentBulletChecked === false && currentBulletText.trim()) {
+                  uncheckedItems.push(currentBulletText.trim());
                 }
                 currentBulletChecked = null;
-                currentBulletText = '';
+                currentBulletText = "";
                 continue;
               }
               
-              // Detect list item start: - [ ] or - [x]
+              // If we are in an exempt section, skip all list item processing
+              if (skippingSection) {
+                // Still reset bullet state on new bullets within exempt sections to avoid carrying over
+                if (/^[-*]\s+\[/.test(line)) {
+                  currentBulletChecked = null;
+                  currentBulletText = "";
+                }
+                continue;
+              }
+              
+              // Detect list item start: - [ ] or - [x]  
               const listItemMatch = /^[-*]\s+\[\s([ xX])\]\s+(.*)/.exec(line);
               
               if (listItemMatch) {
@@ -94,51 +110,50 @@ jobs:
                 currentBulletChecked = isChecked;
                 currentBulletText = restOfLine.slice(0, 150);  // Cap at 150 chars
                 
-                // If not checked, we'll keep tracking continuation lines
+                // If not checked, we will keep tracking continuation lines
                 if (!isChecked) {
                   continue;
                 }
                 
-                // Item is checked - no need to track further
+                // Item is checked - no need to track further  
                 currentBulletChecked = null;
-                currentBulletText = '';
+                currentBulletText = "";
               } else if (currentBulletChecked === false && line.length > 0 && !/^[-*]/.test(line)) {
                 // Continuation of an unchecked multi-line bullet (not a new list item)
-                // Add this continuation to the tracked text
-                currentBulletText += ' ' + line.slice(0, 150 - currentBulletText.length);
+                currentBulletText += " " + line.slice(0, 150 - currentBulletText.length);
               } else if (currentBulletChecked === false && /^[-*]/.test(line)) {
-                // New bullet starts while we're tracking a previous unchecked one - flag the old one
+                // New bullet starts while tracking previous unchecked one — flag the old one  
                 uncheckedItems.push(currentBulletText.trim());
                 currentBulletChecked = null;
-                currentBulletText = '';
+                currentBulletText = "";
               } else if (currentBulletChecked === false && line.length === 0) {
-                // Empty line ends the continuation without a new bullet — flag as incomplete
+                // Empty line ends continuation without new bullet — flag as incomplete  
                 uncheckedItems.push(currentBulletText.trim());
                 currentBulletChecked = null;
-                currentBulletText = '';
+                currentBulletText = "";
               }
             }
             
-            // If we ended while still tracking an unchecked multi-line bullet, flag it
-            if (currentBulletChecked === false) {
+            // If ended while tracking an unchecked multi-line bullet, flag it (only if not in exempt section)
+            if (!skippingSection && currentBulletChecked === false && currentBulletText.trim()) {
               uncheckedItems.push(currentBulletText.trim());
             }
             
             if (uncheckedItems.length === 0) {
-              core.info('no open acceptance/test items — close stands');
+              core.info("no open acceptance/test items — close stands");
               return;
             }
             
             await github.rest.issues.update({
               owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: issue.number, state: 'open',
+              issue_number: issue.number, state: "open",
             });
             
-            const formattedList = uncheckedItems.map(i => `- [ ] ${i}`).join('\n');
+            const formattedList = uncheckedItems.map(i => `- [ ] ${i}`).join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: issue.number,
               body: `🚧 **Reopened by the close-completeness guard** — closed as *completed* but still has ${uncheckedItems.length} unchecked item(s):\n\n${formattedList}\n\n` +
-                `Finish + check them, or close it **as "not planned"** / add a \`force-close\` label. Exempt sections (Out of scope / Blocked by / Reverse-if-wrong / Candidate / Further notes) aren't counted.`,
+                `Finish + check them, or close it **as "not planned"** / add a \`force-close\` label. Exempt sections (Out of scope / Blocked by / Reverse-if-wrong / Candidate / Further notes) are not counted.`,
             });
             core.warning(`reopened #${issue.number} — ${uncheckedItems.length} unchecked item(s)`);
