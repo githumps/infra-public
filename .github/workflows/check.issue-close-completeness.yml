@@ -76,12 +76,15 @@ jobs:
               const isSectionHeader = /^#{1,6}\s+|^(\*\*|__)[^*\n]*(\*\*|__)/.test(line);
               
               if (isSectionHeader) {
+                // Save previous section state before updating (for flushing pending bullets correctly)
+                const prevSkippingSection = skippingSection;
+                
                 // Check if this is an exempt section header
                 const lowerLine = line.toLowerCase().replace(/[#*_]/g, "");
                 skippingSection = /out of scope|blocked by|reverse-if-wrong|candidate|further notes|notes$/.test(lowerLine);
                 
-                // If we were tracking a multi-line bullet that ended without being checked, flag it (only if not in exempt section)
-                if (!skippingSection && currentBulletChecked === false && currentBulletText.trim()) {
+                // If we were tracking a multi-line bullet that ended without being checked, flag it (use prev state)
+                if (!prevSkippingSection && currentBulletChecked === false && currentBulletText.trim()) {
                   uncheckedItems.push(currentBulletText.trim());
                 }
                 currentBulletChecked = null;
@@ -120,7 +123,10 @@ jobs:
                 currentBulletText = "";
               } else if (currentBulletChecked === false && line.length > 0 && !/^[-*]/.test(line)) {
                 // Continuation of an unchecked multi-line bullet (not a new list item)
-                currentBulletText += " " + line.slice(0, 150 - currentBulletText.length);
+                const remaining = Math.max(0, 150 - currentBulletText.length - 1);  // -1 for leading space
+                if (remaining > 0) {
+                  currentBulletText += " " + line.slice(0, remaining);
+                }
               } else if (currentBulletChecked === false && /^[-*]/.test(line)) {
                 // New bullet starts while tracking previous unchecked one — flag the old one  
                 uncheckedItems.push(currentBulletText.trim());
