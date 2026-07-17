@@ -3,12 +3,32 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")" && pwd)
 frames=$(mktemp -d)
+trap 'rm -rf "$frames"' EXIT
 mkdir -p "$frames/png"
+
+chrome=${CHROME_BIN:-}
+if [[ -z "$chrome" ]]; then
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+    if [[ -x "$candidate" ]]; then
+      chrome=$candidate
+      break
+    fi
+  done
+fi
+if [[ -z "$chrome" ]]; then
+  chrome=$(command -v google-chrome || command -v chromium || true)
+fi
+if [[ -z "$chrome" || ! -x "$chrome" ]]; then
+  echo "error: Chrome/Chromium not found; set CHROME_BIN to an executable browser" >&2
+  exit 1
+fi
 
 for frame in 0 1 2 3 4 5 6 7; do
   angle=$((frame * 45))
   offset=$((frame * 26))
-  next=$((offset + 208))
+  next=$((offset + 104))
   cat >"$frames/frame-$frame.svg" <<SVG
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
   <defs>
@@ -50,11 +70,11 @@ for frame in 0 1 2 3 4 5 6 7; do
   <text x="905" y="486" fill="#667783" text-anchor="end" font-family="Arial,sans-serif" font-size="17">10 minute fan hold</text>
 </svg>
 SVG
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  "$chrome" \
     --headless --disable-gpu --hide-scrollbars \
     --window-size=960,540 \
     --screenshot="$frames/png/frame-$frame.png" \
-    "file://$frames/frame-$frame.svg" >/dev/null 2>&1
+    "file://$frames/frame-$frame.svg" >/dev/null
 done
 
 ffmpeg -hide_banner -loglevel error -y -framerate 8 -i "$frames/png/frame-%d.png" \
