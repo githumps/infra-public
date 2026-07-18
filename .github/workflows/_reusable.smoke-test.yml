@@ -148,6 +148,9 @@ jobs:
 
             # Capture both body and status in one request. -w appends the
             # status on its own trailing line; everything before it is the body.
+            # hygiene: allow-curl-no-timeout both flags are set in args[] above
+            # (--max-time "$MAX_TIME" --connect-timeout 10) - a static linter
+            # can't trace the array back to this call.
             resp=$(curl "${args[@]}" -w $'\n%{http_code}' "$url" || true)
             status=$(printf '%s' "$resp" | tail -n1)
             payload=$(printf '%s' "$resp" | sed '$d')
