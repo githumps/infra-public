@@ -1,0 +1,44 @@
+name: check · workflow hygiene
+
+# Lints infra-public's own .github/workflows/*.yml against the four
+# repo-agnostic rules ported from the fleet's canonical infrastructure/
+# .github/scripts/workflow_hygiene.py (infra-public#46 - see docs/
+# workflow-hygiene.md for how the two stay in sync). infra-public is the
+# shared reusable-workflow library every fleet repo inherits, so drift
+# here (unpinned actions, missing curl timeouts, missing job timeouts) is
+# inherited by every consumer with nothing local to catch it - #18 and
+# #36 were both found only by manual audit, not by any gate.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/workflow_hygiene.py"
+      - ".github/scripts/workflow_hygiene_test.py"
+      - ".github/workflows/check.workflow-hygiene.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/workflow_hygiene.py"
+
+permissions:
+  contents: read
+
+# Cancel superseded runs - only the latest commit's state matters, and
+# there is no scheduled run here to preserve.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: "Unit tests for the linter itself"
+        run: python3 .github/scripts/workflow_hygiene_test.py
+      - name: "Lint this repo's own workflows"
+        run: python3 .github/scripts/workflow_hygiene.py
