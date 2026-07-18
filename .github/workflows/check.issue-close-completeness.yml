@@ -38,16 +38,19 @@ jobs:
       # check.issue-close-completeness.yml@<ref>`, the job's DEFAULT
       # checkout context is the CALLER's repo, not infra-public - so
       # parse.js is not present unless explicitly fetched. `github.
-      # workflow_sha` is documented to resolve to the SHA of the reusable
-      # workflow FILE ITSELF (not the caller's), i.e. exactly the ref the
-      # caller pinned - checking that out guarantees the module matches
-      # the exact version of this workflow that's currently running,
-      # regardless of what repo/ref is calling it.
+      # workflow_sha` resolves to the CALLER's top-level workflow file SHA
+      # (wrong repo entirely here - CodeRabbit caught this, verified
+      # against GitHub's docs). `job.workflow_sha` is what resolves to the
+      # SHA of the file that defines the CURRENT job - for a reusable
+      # workflow's own job, that's this file itself, at exactly the ref
+      # the caller pinned - checking that out guarantees the module
+      # matches the exact version of this workflow that's currently
+      # running, regardless of what repo/ref is calling it.
       - name: "Checkout infra-public (self) for the parser module"
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: githumps/infra-public
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ job.workflow_sha }}
           path: _close-completeness-guard-src
           persist-credentials: false
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
