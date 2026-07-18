@@ -1,0 +1,41 @@
+name: check · issue-close completeness guard
+
+# Gates the pure checklist parser (.github/scripts/close-completeness/
+# parse.js) behind the fixture suite pinning its documented bug classes
+# (infra-public#52/#53/#54) - the guard mutates issue state in production
+# and had already needed three rounds of post-merge fixes before this test
+# surface existed. Node stdlib test runner only - no npm runtime dependency.
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/close-completeness/**"
+      - ".github/workflows/check.issue-close-completeness.yml"
+      - ".github/workflows/check.close-completeness-guard.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/close-completeness/**"
+
+permissions:
+  contents: read
+
+# Cancel superseded runs - only the latest commit's state matters, and
+# there is no scheduled run here to preserve.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: "24"
+      - name: "node --test"
+        run: node --test .github/scripts/close-completeness/parse.test.js
