@@ -13,6 +13,7 @@ tests in test_env.py.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 
 _TRUTHY = ("1", "true", "yes", "on")
@@ -24,8 +25,6 @@ def _read_cave_enable_flag(prefix: str, persona: str, *, kind_label: str) -> boo
     an explicit falsy value (a normal disabled state). Warns once when set
     to something unrecognized (a typo'd "treu" would otherwise silently
     disable the lane/channel with no signal)."""
-    import os
-
     enabled_var = f"{prefix}_CAVE_ENABLED"
     raw = os.getenv(enabled_var, "").strip().lower()
     if raw in _TRUTHY:
