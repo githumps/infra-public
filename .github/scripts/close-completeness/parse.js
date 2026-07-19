@@ -92,6 +92,16 @@ function findUncheckedItems(body) {
     const listItemMatch = /^[-*]\s+\[([ xX])\]\s+(.*)/.exec(line);
 
     if (listItemMatch) {
+      // Flush any still-open unchecked bullet BEFORE starting to track this
+      // one (#58): consecutive `- [ ]` lines with no blank line between them
+      // are the overwhelmingly common Acceptance Criteria shape, and the
+      // unconditional overwrite below used to silently drop every item in
+      // such a run except the last - a severe false-negative that let
+      // issues stay closed-as-completed with unfinished work.
+      if (currentBulletChecked === false && currentBulletText.trim()) {
+        uncheckedItems.push(currentBulletText.trim());
+      }
+
       const isChecked = /x|X/.test(listItemMatch[1]);
       const restOfLine = listItemMatch[2];
 

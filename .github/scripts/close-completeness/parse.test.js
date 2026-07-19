@@ -23,23 +23,25 @@ test("unchecked item is returned", () => {
   assert.deepEqual(findUncheckedItems(body), ["not done thing"]);
 });
 
-// KNOWN BUG, tracked in #58, preserved verbatim by this extraction (parity
-// is this PR's whole job - fixing behavior is explicitly out of scope, see
-// #52/#53's "observable guard behaviour must not change"): a new checkbox
-// bullet immediately following an OPEN unchecked bullet - no blank line, no
-// header between them - silently clobbers the open bullet's tracking state
-// before it ever reaches a flush point. Only the LAST item in an unbroken
-// run of consecutive bullets survives. This is the common real-world shape
-// for an Acceptance Criteria list, so #58 is a real, severe false-negative
-// in the LIVE guard - not a hypothetical edge case.
-test("KNOWN BUG #58: consecutive unchecked bullets with no blank line between them - only the LAST one survives", () => {
+// FIXED (#58): a new checkbox bullet immediately following an OPEN
+// unchecked bullet - no blank line, no header between them - now flushes
+// the open bullet to the unchecked list before tracking the new one. This
+// is the common real-world Acceptance Criteria shape; the old clobber
+// behavior silently dropped every item in a consecutive run except the
+// last (a severe false-negative in the LIVE guard).
+test("#58 fixed: consecutive unchecked bullets are ALL returned, mixed with checked ones", () => {
   const body = ["- [x] first (done)", "- [ ] second (open)", "- [X] third (done, capital X)", "- [ ] fourth (open)"].join(
     "\n",
   );
-  // If this assertion ever starts failing because MORE items are returned,
-  // that means #58 got fixed - update this fixture (and move it out of the
-  // "known bug" file) rather than treating the new pass as a regression.
-  assert.deepEqual(findUncheckedItems(body), ["fourth (open)"]);
+  assert.deepEqual(findUncheckedItems(body), ["second (open)", "fourth (open)"]);
+});
+
+// The regression fixture #58's acceptance criteria call for explicitly:
+// 3+ consecutive unchecked items, the overwhelmingly common shape, ALL
+// returned in order.
+test("#58 regression: an unbroken run of three unchecked items returns all three", () => {
+  const body = "- [ ] item one\n- [ ] item two\n- [ ] item three\n";
+  assert.deepEqual(findUncheckedItems(body), ["item one", "item two", "item three"]);
 });
 
 test("bug class (a): line-wrapped continuation bullet is tracked and flushed on blank line", () => {
@@ -54,13 +56,13 @@ test("bug class (a): line-wrapped continuation bullet is tracked and flushed on 
   assert.match(result[0], /wraps onto a second line/);
 });
 
-// KNOWN BUG, tracked in #58 (same root cause as above): a continuation in
-// progress is ALSO clobbered, not flushed, when a real new checkbox bullet
-// follows with no blank line - only "second item" survives.
-test("KNOWN BUG #58: a continuation in progress is clobbered (not flushed) by an immediately-following real bullet", () => {
+// FIXED (#58, same root cause as above): a continuation in progress is
+// flushed - with its accumulated continuation text - when a real new
+// checkbox bullet follows with no blank line.
+test("#58 fixed: an in-progress continuation is flushed intact by an immediately-following real bullet", () => {
   const body = ["- [ ] first item wraps", "  continues here", "- [ ] second item"].join("\n");
   const result = findUncheckedItems(body);
-  assert.deepEqual(result, ["second item"]);
+  assert.deepEqual(result, ["first item wraps continues here", "second item"]);
 });
 
 test("a bullet-LIKE line that is NOT a valid checkbox correctly flushes the open bullet first (the one path that does work)", () => {
@@ -104,8 +106,11 @@ test("bug class (c): a real ATX header right after an unchecked bullet with no b
 // literal `*`, so it falls into the SAME clobber-on-bullet-like-line path
 // as #58's other cases, rather than genuine continuation text: the open
 // bullet gets flushed (correctly) but the bold line's own content is
-// silently discarded (not appended, not counted as its own item).
-test("KNOWN BUG #58: a **bold** line after an open bullet is swallowed - its content never appears anywhere", () => {
+// discarded. #58's acceptance criteria accept exactly this outcome
+// ("correctly flushes the prior bullet"): the bold line is emphasis
+// prose, not a checklist item, so dropping ITS text while flagging the
+// open bullet is the documented, deliberate behavior - no longer a bug.
+test("#58 accepted behavior: a **bold** line after an open bullet flushes the bullet; the bold text itself is prose, not an item", () => {
   const body = ["- [ ] an item whose next line looks bold", "**not actually a header, just emphasis**"].join("\n");
   const result = findUncheckedItems(body);
   // The bold line's text ("not actually a header...") never appears in the
